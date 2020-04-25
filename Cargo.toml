@@ -1,0 +1,20 @@
+[package]
+edition = '2018'
+name = "intro_chapter_adder"
+version = "0.0.1-dev"
+authors = ["Andreas Fuchs <asf@boinkor.net>"]
+license = "MIT"
+repository = "https://github.com/antifuchs/intro_chapter_adder"
+readme = "README.md"
+description = "adds chapters to tv episodes"
+documentation = "https://docs.rs/intro_chapter_adder"
+
+[badges]
+travis-ci = { repository = "antifuchs/intro_chapter_adder", branch = "master" }
+maintenance = { status = "passively-maintained" }
+
+[package.metadata.template_ci.clippy]
+allow_failure = false
+version = "stable"
+
+[dependencies]

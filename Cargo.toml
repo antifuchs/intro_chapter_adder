@@ -18,3 +18,9 @@ allow_failure = false
 version = "stable"
 
 [dependencies]
+ffmpeg4 = "0.4.0"
+anyhow = "*"
+csv = "1.1.3"
+serde_derive = "*"
+serde = "*"
+mktemp = "0.4.0"

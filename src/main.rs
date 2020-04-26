@@ -39,12 +39,12 @@ impl Chapter {
     fn from_ffmpeg(id: usize, chapter: ffmpeg::format::chapter::Chapter) -> Self {
         Chapter {
             id,
+            start: Duration::from_secs_f64(chapter.start() as f64 / chapter.time_base().1 as f64),
             name: chapter
                 .metadata()
                 .get("title")
                 .unwrap_or("untitled")
                 .to_string(),
-            start: Duration::from_secs_f64(chapter.start() as f64 / chapter.time_base().1 as f64),
         }
     }
 
@@ -100,13 +100,12 @@ fn adjust_tags_on(base: &Path, title_info: TitleInfo) -> anyhow::Result<()> {
 
     let tmpfile = Temp::new_file()?;
     let f = File::create(tmpfile.as_path())?;
-    let mut w = BufWriter::new(&f);
+    let mut w = BufWriter::new(f);
     for ch in chapters {
         writeln!(&mut w, "{}", ch)?;
         println!("{}", ch);
     }
-    drop(w);
-    f.sync_all()?;
+    w.into_inner()?.sync_all()?;
 
     let success = Command::new("mkvpropedit")
         .arg(&input)

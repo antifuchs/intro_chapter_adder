@@ -187,7 +187,7 @@ impl Detector {
                             }
                             (DetectState::Start(offset), None, Some(duration), _) => {
                                 let length_f64 = duration.parse()?;
-                                let length = Duration::from_secs_f64(length_f64);
+                                let length = Duration::from_secs_f64(length_f64) - *offset;
                                 candidates.push(Candidate::Darkness {
                                     offset: *offset,
                                     length,
@@ -202,6 +202,7 @@ impl Detector {
                 }
             }
             if state.at_end() {
+                println!("Done with this stream!");
                 break;
             }
         }

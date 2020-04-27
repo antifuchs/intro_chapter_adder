@@ -1,5 +1,5 @@
 extern crate ffmpeg4 as ffmpeg;
-use anyhow::{self, bail};
+use anyhow::{self, bail, Context};
 use mktemp::Temp;
 use serde_derive::*;
 use std::fmt;
@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod detect;
+mod util;
+
 #[derive(Debug, PartialEq, Deserialize)]
 struct TitleInfo {
     location: PathBuf,
@@ -16,15 +19,40 @@ struct TitleInfo {
     theme_end: f64,
 }
 
-fn main() -> anyhow::Result<()> {
+#[derive(Debug, structopt::StructOpt)]
+#[structopt(
+    name = "intro_chapter_adder",
+    about = "A thing dealing with annoying intros on TV shows."
+)]
+enum Options {
+    AddChapterMarkers,
+    DetectSilence {
+        #[structopt(parse(from_os_str))]
+        path: PathBuf,
+    },
+}
+
+#[paw::main]
+fn main(args: Options) -> anyhow::Result<()> {
     let base = PathBuf::from("/Volumes/Media");
 
     ffmpeg::init()?;
-    let mut rdr = csv::Reader::from_reader(io::stdin());
-    for result in rdr.deserialize() {
-        let record: TitleInfo = result?;
-        println!("{:?}", record);
-        adjust_tags_on(&base, record)?;
+    match args {
+        Options::AddChapterMarkers => {
+            let mut rdr = csv::Reader::from_reader(io::stdin());
+            for result in rdr.deserialize() {
+                let record: TitleInfo = result?;
+                println!("{:?}", record);
+                adjust_tags_on(&base, record)?;
+            }
+        }
+        Options::DetectSilence { path } => {
+            let mut ictx =
+                ffmpeg::format::input(&path).context(format!("opening input file {:?}", &path))?;
+            let mut detector = detect::detector(&mut ictx)?;
+            let candidates = detector.detect(&mut ictx, Duration::from_secs(600))?;
+            println!("Silences: {:?}", candidates);
+        }
     }
     Ok(())
 }
@@ -39,7 +67,7 @@ impl Chapter {
     fn from_ffmpeg(id: usize, chapter: ffmpeg::format::chapter::Chapter) -> Self {
         Chapter {
             id,
-            start: Duration::from_secs_f64(chapter.start() as f64 / chapter.time_base().1 as f64),
+            start: util::to_duration(chapter.start(), chapter.time_base()),
             name: chapter
                 .metadata()
                 .get("title")

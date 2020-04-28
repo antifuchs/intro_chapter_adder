@@ -37,6 +37,10 @@ fn main(args: Options) -> anyhow::Result<()> {
     let base = PathBuf::from("/Volumes/Media");
 
     ffmpeg::init()?;
+    unsafe {
+        ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_WARNING);
+    }
+
     match args {
         Options::AddChapterMarkers => {
             let mut rdr = csv::Reader::from_reader(io::stdin());

@@ -1,9 +1,9 @@
 //! Detect silence / blackness on an input file
+use crate::util::to_duration;
 use anyhow::{bail, Context, Result};
 use ffmpeg::{codec, filter, format, frame, media};
+use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
 use std::{fmt::Debug, time::Duration};
-
-use crate::util::to_duration;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Candidate {
@@ -92,6 +92,15 @@ impl Detector {
 
         let mut audio_state = DetectState::None;
         let mut video_state = DetectState::None;
+
+        // progress:
+        let mut last_ts = Duration::from_secs(0);
+        let bar = ProgressBar::new(until.as_millis() as u64);
+        bar.set_draw_delta(10000);
+        bar.set_style(ProgressStyle::default_bar().template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}ms/{len:7}ms [ETA:{eta}] {msg}",
+        ));
+
         for (stream, mut packet) in ictx.packets() {
             if state.reading_audio() && stream.index() == self.audio_stream {
                 packet.rescale_ts(stream.time_base(), in_time_base);
@@ -100,12 +109,10 @@ impl Detector {
                     audio.set_pts(timestamp);
                     if let Some(timestamp) = timestamp {
                         let at_ts = to_duration(timestamp, in_time_base);
-                        print!("At ts: {:?} / {:?}                   \r", at_ts, until);
                         if at_ts >= until {
                             state = state.end_of_audio();
                         }
                     }
-
                     self.audio_filter
                         .get("in")
                         .unwrap()
@@ -134,6 +141,7 @@ impl Detector {
                             (DetectState::Start(offset), None, Some(duration), _) => {
                                 let length_f64 = duration.parse()?;
                                 let length = Duration::from_secs_f64(length_f64);
+                                bar.set_message(&format!("silence at {}", HumanDuration(*offset)));
                                 candidates.push(Candidate::Silence {
                                     offset: *offset,
                                     length,
@@ -152,14 +160,14 @@ impl Detector {
                 if let Ok(true) = self.video_decoder.decode(&packet, &mut video) {
                     let timestamp = video.timestamp();
                     video.set_pts(timestamp);
-                    if let Some(timestamp) = timestamp {
-                        let at_ts = to_duration(timestamp, in_time_base);
-                        print!("At ts: {:?} / {:?}                   \r", at_ts, until);
+                    if let Some(ts) = timestamp {
+                        let at_ts = to_duration(ts, in_time_base);
                         if at_ts >= until {
                             state = state.end_of_video();
                         }
+                        bar.inc((at_ts - last_ts).as_millis() as u64);
+                        last_ts = at_ts;
                     }
-
                     self.video_filter
                         .get("in")
                         .unwrap()
@@ -188,6 +196,7 @@ impl Detector {
                             (DetectState::Start(offset), None, Some(duration), _) => {
                                 let length_f64 = duration.parse()?;
                                 let length = Duration::from_secs_f64(length_f64) - *offset;
+                                bar.set_message(&format!("darkness at {}", HumanDuration(*offset)));
                                 candidates.push(Candidate::Darkness {
                                     offset: *offset,
                                     length,

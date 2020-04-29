@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{cmp::min, thread, time::Duration};
+use std::{thread, time::Duration};
 
 mod detect;
 mod util;
@@ -228,17 +228,18 @@ fn set_chapters(
     }
     w.into_inner()?.sync_all()?;
 
-    let success = Command::new("mkvpropedit")
+    let output = Command::new("mkvpropedit")
         .arg(&mkv_file)
         .arg("--chapters")
         .arg(tmpfile.as_path())
-        .status()?
-        .success();
-    if !success {
+        .output()?;
+    if !output.status.success() {
         bail!(
-            "unsuccessful for {:?} - mkv chapter contents:\n{:?}",
+            "unsuccessful for {:?} - mkv chapter contents:\n{:?}\n\nmkvpropedit stdout:\n{:?}\nstderr:\n{:?}",
             mkv_file,
-            fs::read_to_string(tmpfile.as_path()).unwrap_or("unreadable".to_string())
+            fs::read_to_string(tmpfile.as_path()).unwrap_or("unreadable".to_string()),
+            output.stdout,
+            output.stderr
         );
     }
 

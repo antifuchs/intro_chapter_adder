@@ -2,7 +2,7 @@
 use crate::util::to_duration;
 use anyhow::{bail, Context, Result};
 use ffmpeg::{codec, filter, format, frame, media};
-use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
+use indicatif::{HumanDuration, ProgressBar};
 use std::{fmt::Debug, time::Duration};
 
 #[derive(Debug, PartialEq)]
@@ -83,6 +83,7 @@ impl Detector {
         &mut self,
         ictx: &mut format::context::Input,
         until: Duration,
+        bar: &ProgressBar,
     ) -> Result<Vec<Candidate>> {
         let mut candidates = vec![];
         let in_time_base = self.audio_decoder.time_base();
@@ -92,14 +93,6 @@ impl Detector {
 
         let mut audio_state = DetectState::None;
         let mut video_state = DetectState::None;
-
-        // progress:
-        let mut last_ts = Duration::from_secs(0);
-        let bar = ProgressBar::new(until.as_millis() as u64);
-        bar.set_draw_delta(10000);
-        bar.set_style(ProgressStyle::default_bar().template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}ms/{len:7}ms [ETA:{eta}] {msg}",
-        ));
 
         for (stream, mut packet) in ictx.packets() {
             if state.reading_audio() && stream.index() == self.audio_stream {
@@ -165,8 +158,7 @@ impl Detector {
                         if at_ts >= until {
                             state = state.end_of_video();
                         }
-                        bar.inc((at_ts - last_ts).as_millis() as u64);
-                        last_ts = at_ts;
+                        bar.set_position(at_ts.as_millis() as u64);
                     }
                     self.video_filter
                         .get("in")
@@ -211,7 +203,6 @@ impl Detector {
                 }
             }
             if state.at_end() {
-                println!("Done with this stream!");
                 break;
             }
         }

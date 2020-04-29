@@ -27,3 +27,4 @@ mktemp = "0.4.0"
 structopt = { version = "0.3", features = [ "paw" ] }
 paw = "1.0"
 indicatif = "0.14.0"
+humantime = "2.0.0"

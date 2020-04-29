@@ -1,5 +1,6 @@
 extern crate ffmpeg4 as ffmpeg;
 use anyhow::{self, bail, Context};
+use indicatif::{ProgressBar, ProgressStyle};
 use mktemp::Temp;
 use serde_derive::*;
 use std::fmt;
@@ -29,6 +30,14 @@ enum Options {
     DetectSilence {
         #[structopt(parse(from_os_str))]
         path: PathBuf,
+
+        /// Scan this long into the beginning of the file
+        #[structopt(
+            long = "--until",
+            default_value = "10m",
+            parse(try_from_str = humantime::parse_duration)
+        )]
+        until: Duration,
     },
 }
 
@@ -49,16 +58,29 @@ fn main(args: Options) -> anyhow::Result<()> {
                 println!("{:?}", record);
                 adjust_tags_on(&base, record)?;
             }
+            Ok(())
         }
-        Options::DetectSilence { path } => {
+        Options::DetectSilence { path, until } => {
+            let bar = ProgressBar::new(until.as_millis() as u64);
+            bar.set_style(ProgressStyle::default_bar().template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}ms/{len:7}ms [ETA:{eta}] {msg}",
+            ));
             let mut ictx =
                 ffmpeg::format::input(&path).context(format!("opening input file {:?}", &path))?;
             let mut detector = detect::detector(&mut ictx)?;
-            let candidates = detector.detect(&mut ictx, Duration::from_secs(600))?;
-            println!("Silences: {:?}", candidates);
+            match detector.detect(&mut ictx, until, &bar) {
+                Ok(candidates) => {
+                    bar.finish_and_clear();
+                    println!("Silences: {:?}", candidates);
+                    Ok(())
+                }
+                Err(e) => {
+                    bar.abandon_with_message(&format!("Error: {}", e));
+                    Err(e).into()
+                }
+            }
         }
     }
-    Ok(())
 }
 
 struct Chapter {

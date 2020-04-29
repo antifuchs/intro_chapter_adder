@@ -38,6 +38,14 @@ enum Options {
             parse(try_from_str = humantime::parse_duration)
         )]
         until: Duration,
+
+        /// Only consider pauses this long or longer as real "breaks"
+        #[structopt(
+            long = "--threshold",
+            default_value = "200ms",
+            parse(try_from_str = humantime::parse_duration)
+        )]
+        threshold: Duration,
     },
 }
 
@@ -60,7 +68,11 @@ fn main(args: Options) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Options::DetectSilence { path, until } => {
+        Options::DetectSilence {
+            path,
+            until,
+            threshold,
+        } => {
             let bar = ProgressBar::new(until.as_millis() as u64);
             bar.set_style(ProgressStyle::default_bar().template(
                 "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}ms/{len:7}ms [ETA:{eta}] {msg}",
@@ -68,7 +80,7 @@ fn main(args: Options) -> anyhow::Result<()> {
             let mut ictx =
                 ffmpeg::format::input(&path).context(format!("opening input file {:?}", &path))?;
             let mut detector = detect::detector(&mut ictx)?;
-            match detector.detect(&mut ictx, until, &bar) {
+            match detector.detect(&mut ictx, until, threshold, &bar) {
                 Ok(candidates) => {
                     bar.finish_and_clear();
                     println!("Silences: {:?}", candidates);

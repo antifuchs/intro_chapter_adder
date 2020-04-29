@@ -104,6 +104,7 @@ impl Detector {
         &mut self,
         ictx: &mut format::context::Input,
         until: Duration,
+        threshold: Duration,
         bar: &ProgressBar,
     ) -> Result<Vec<Candidate>> {
         let mut candidates = vec![];
@@ -174,7 +175,9 @@ impl Detector {
                                     "quiet blackness at {}",
                                     HumanDuration(*offset)
                                 ));
-                                candidates.push(Candidate::new(*offset, length));
+                                if length > threshold {
+                                    candidates.push(Candidate::new(*offset, length));
+                                }
                                 blank_state = DetectState::Video(*video);
                             }
                             combo => {
@@ -239,8 +242,13 @@ impl Detector {
                                 let offset = max(video, audio);
                                 let end = to_duration(ts, in_time_base);
                                 let length = end - *video;
-                                bar.set_message(&format!("darkness at {}", HumanDuration(*offset)));
-                                candidates.push(Candidate::new(*offset, length));
+                                bar.set_message(&format!(
+                                    "quiet blackness at {}",
+                                    HumanDuration(*offset)
+                                ));
+                                if length > threshold {
+                                    candidates.push(Candidate::new(*offset, length));
+                                }
                                 blank_state = DetectState::Audio(*audio);
                             }
                             combo => {

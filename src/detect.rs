@@ -9,7 +9,7 @@ use std::{cmp::max, fmt::Debug, time::Duration};
 /// a silence.
 #[derive(PartialEq)]
 pub(crate) struct Candidate {
-    offset: Duration,
+    pub(crate) offset: Duration,
     length: Duration,
 }
 
@@ -149,6 +149,7 @@ impl Detector {
                             audio.timestamp(),
                         ) {
                             (_, None, None, _) => {}
+                            (_, Some(_), Some(_), _) => {} // skip super short silences
                             (DetectState::Audio(_), None, Some(_), _) => {
                                 blank_state = DetectState::None;
                             }
@@ -221,6 +222,7 @@ impl Detector {
                             video.timestamp(),
                         ) {
                             (_, None, None, _) => {}
+                            (_, Some(_), Some(_), _) => {} // skip super short darkness
                             (DetectState::Video(_), None, Some(_), _) => {
                                 blank_state = DetectState::None;
                             }

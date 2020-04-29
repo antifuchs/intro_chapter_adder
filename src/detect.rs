@@ -3,18 +3,39 @@ use crate::util::to_duration;
 use anyhow::{bail, Context, Result};
 use ffmpeg::{codec, filter, format, frame, media};
 use indicatif::{HumanDuration, ProgressBar};
-use std::{fmt::Debug, time::Duration};
+use std::{cmp::max, fmt::Debug, time::Duration};
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum Candidate {
-    Darkness { offset: Duration, length: Duration },
-    Silence { offset: Duration, length: Duration },
+/// A spot in the video where there's both a blank (black) screen and
+/// a silence.
+#[derive(PartialEq)]
+pub(crate) struct Candidate {
+    offset: Duration,
+    length: Duration,
+}
+
+impl Debug for Candidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{{ {} for {} }}",
+            humantime::format_duration(self.offset),
+            humantime::format_duration(self.length)
+        )
+    }
+}
+
+impl Candidate {
+    pub(crate) fn new(offset: Duration, length: Duration) -> Self {
+        Self { offset, length }
+    }
 }
 
 #[derive(Debug, PartialEq)]
 enum DetectState {
     None,
-    Start(Duration),
+    Video(Duration),
+    Audio(Duration),
+    VideoAndAudio { video: Duration, audio: Duration },
 }
 
 pub(crate) struct Detector {
@@ -91,8 +112,7 @@ impl Detector {
         let mut video = frame::Video::empty();
         let mut state = StreamState::default();
 
-        let mut audio_state = DetectState::None;
-        let mut video_state = DetectState::None;
+        let mut blank_state = DetectState::None;
 
         for (stream, mut packet) in ictx.packets() {
             if state.reading_audio() && stream.index() == self.audio_stream {
@@ -122,24 +142,40 @@ impl Detector {
                         // read audio frame-by-frame:
                         let meta = audio.metadata();
                         match (
-                            &audio_state,
+                            &blank_state,
                             meta.get("lavfi.silence_start"),
                             meta.get("lavfi.silence_duration"),
                             audio.timestamp(),
                         ) {
                             (_, None, None, _) => {}
-                            (DetectState::None, Some(_), None, Some(ts)) => {
-                                audio_state = DetectState::Start(to_duration(ts, in_time_base));
+                            (DetectState::Audio(_), None, Some(_), _) => {
+                                blank_state = DetectState::None;
                             }
-                            (DetectState::Start(offset), None, Some(duration), _) => {
-                                let length_f64 = duration.parse()?;
-                                let length = Duration::from_secs_f64(length_f64);
-                                bar.set_message(&format!("silence at {}", HumanDuration(*offset)));
-                                candidates.push(Candidate::Silence {
-                                    offset: *offset,
-                                    length,
-                                });
-                                audio_state = DetectState::None;
+                            (DetectState::None, Some(_), None, Some(ts)) => {
+                                blank_state = DetectState::Audio(to_duration(ts, in_time_base));
+                            }
+                            (DetectState::Video(video), Some(_), None, Some(ts)) => {
+                                blank_state = DetectState::VideoAndAudio {
+                                    video: *video,
+                                    audio: to_duration(ts, in_time_base),
+                                };
+                            }
+                            (
+                                DetectState::VideoAndAudio { video, audio },
+                                None,
+                                Some(_),
+                                Some(ts),
+                            ) => {
+                                let end = to_duration(ts, in_time_base);
+                                let length = end - *audio;
+                                let offset = max(video, audio);
+
+                                bar.set_message(&format!(
+                                    "quiet blackness at {}",
+                                    HumanDuration(*offset)
+                                ));
+                                candidates.push(Candidate::new(*offset, length));
+                                blank_state = DetectState::Video(*video);
                             }
                             combo => {
                                 bail!("Unclear combination of audio things: {:?}", combo);
@@ -176,24 +212,36 @@ impl Detector {
                         // read video frame-by-frame:
                         let meta = video.metadata();
                         match (
-                            &video_state,
+                            &blank_state,
                             meta.get("lavfi.black_start"),
                             meta.get("lavfi.black_end"),
                             video.timestamp(),
                         ) {
                             (_, None, None, _) => {}
-                            (DetectState::None, Some(_), None, Some(ts)) => {
-                                video_state = DetectState::Start(to_duration(ts, in_time_base));
+                            (DetectState::Video(_), None, Some(_), _) => {
+                                blank_state = DetectState::None;
                             }
-                            (DetectState::Start(offset), None, Some(duration), _) => {
-                                let length_f64 = duration.parse()?;
-                                let length = Duration::from_secs_f64(length_f64) - *offset;
+                            (DetectState::None, Some(_), None, Some(ts)) => {
+                                blank_state = DetectState::Video(to_duration(ts, in_time_base));
+                            }
+                            (DetectState::Audio(video), Some(_), None, Some(ts)) => {
+                                blank_state = DetectState::VideoAndAudio {
+                                    video: *video,
+                                    audio: to_duration(ts, in_time_base),
+                                };
+                            }
+                            (
+                                DetectState::VideoAndAudio { video, audio },
+                                None,
+                                Some(_),
+                                Some(ts),
+                            ) => {
+                                let offset = max(video, audio);
+                                let end = to_duration(ts, in_time_base);
+                                let length = end - *video;
                                 bar.set_message(&format!("darkness at {}", HumanDuration(*offset)));
-                                candidates.push(Candidate::Darkness {
-                                    offset: *offset,
-                                    length,
-                                });
-                                video_state = DetectState::None;
+                                candidates.push(Candidate::new(*offset, length));
+                                blank_state = DetectState::Audio(*audio);
                             }
                             combo => {
                                 bail!("Unclear combination of video things: {:?}", combo);

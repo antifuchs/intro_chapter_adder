@@ -2,15 +2,16 @@
 use crate::util::to_duration;
 use anyhow::{Context, Result};
 use ffmpeg::{codec, filter, format, frame, media, Packet, Rational, Stream};
+use format::context::input::PacketIter;
 use indicatif::{HumanDuration, ProgressBar};
-use std::{cmp::max, fmt::Debug, time::Duration};
+use std::{cmp::max, collections::VecDeque, fmt::Debug, time::Duration};
 
 /// A spot in the video where there's both a blank (black) screen and
 /// a silence.
 #[derive(PartialEq)]
-pub(crate) struct Candidate {
-    pub(crate) offset: Duration,
-    length: Duration,
+pub struct Candidate {
+    pub offset: Duration,
+    pub length: Duration,
 }
 
 impl Debug for Candidate {
@@ -43,20 +44,31 @@ pub(crate) struct Detector {
     video: BlankDetector,
 }
 
-impl Detector {
-    pub(crate) fn detect(
-        &mut self,
-        ictx: &mut format::context::Input,
-        until: Duration,
-        threshold: Duration,
-        bar: &ProgressBar,
-    ) -> Result<Vec<Candidate>> {
-        let mut candidates = vec![];
-        let mut blank_state = DetectState::None;
+pub(crate) struct BlankIterator<'a> {
+    detector: Detector,
+    packets: PacketIter<'a>,
+    blank_state: DetectState,
+    candidates: VecDeque<Candidate>,
+    until: Duration,
+    bar: &'a ProgressBar,
+}
 
-        for (stream, mut packet) in ictx.packets() {
-            self.audio
-                .detected_pauses_from_packet(&stream, &mut packet, until, bar, |pause| {
+impl<'a> Iterator for BlankIterator<'a> {
+    type Item = Candidate;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(cand) = self.candidates.pop_front() {
+            return Some(cand);
+        }
+        // nothing queued up, let's get the next packet & iterate:
+        let mut blank_state = self.blank_state;
+        let mut candidates = VecDeque::new();
+        let bar = self.bar;
+
+        while let Some((stream, mut packet)) = self.packets.next() {
+            self.detector
+                .audio
+                .detected_pauses_from_packet(&stream, &mut packet, self.until, bar, |pause| {
                     blank_state = match (pause, blank_state) {
                         (PauseMatch::None, s) => s,
                         (PauseMatch::Start(d), DetectState::None) => DetectState::Audio(d),
@@ -70,9 +82,7 @@ impl Detector {
                                 "quiet blackness at {}",
                                 HumanDuration(offset)
                             ));
-                            if length > threshold {
-                                candidates.push(Candidate::new(offset, length));
-                            }
+                            candidates.push_back(Candidate::new(offset, length));
                             DetectState::Video(video)
                         }
                         (PauseMatch::End(_), DetectState::Audio(_)) => DetectState::None,
@@ -80,10 +90,11 @@ impl Detector {
                             unreachable!("Unclear combination of audio circumstances: {:?}", combo);
                         }
                     };
-                })?;
-
-            self.video
-                .detected_pauses_from_packet(&stream, &mut packet, until, bar, |pause| {
+                })
+                .unwrap();
+            self.detector
+                .video
+                .detected_pauses_from_packet(&stream, &mut packet, self.until, bar, |pause| {
                     blank_state = match (pause, blank_state) {
                         (PauseMatch::None, s) => s,
                         (PauseMatch::Start(d), DetectState::None) => DetectState::Video(d),
@@ -97,9 +108,7 @@ impl Detector {
                                 "quiet blackness at {}",
                                 HumanDuration(offset)
                             ));
-                            if length > threshold {
-                                candidates.push(Candidate::new(offset, length));
-                            }
+                            candidates.push_back(Candidate::new(offset, length));
                             DetectState::Audio(audio)
                         }
                         (PauseMatch::End(_), DetectState::Video(_)) => DetectState::None,
@@ -107,13 +116,37 @@ impl Detector {
                             unreachable!("Unclear combination of video circumstances: {:?}", combo);
                         }
                     }
-                })?;
+                })
+                .unwrap();
 
-            if self.video.at_end && self.audio.at_end {
-                break;
+            self.blank_state = blank_state;
+            self.candidates.append(&mut candidates);
+            if let Some(cand) = self.candidates.pop_front() {
+                return Some(cand);
+            }
+            if self.detector.video.at_end && self.detector.audio.at_end {
+                return None;
             }
         }
-        Ok(candidates)
+        None
+    }
+}
+
+impl Detector {
+    pub fn markers<'a>(
+        self,
+        ictx: &'a mut format::context::Input,
+        until: Duration,
+        bar: &'a ProgressBar,
+    ) -> Result<BlankIterator<'a>> {
+        Ok(BlankIterator {
+            detector: self,
+            packets: ictx.packets(),
+            blank_state: DetectState::None,
+            candidates: VecDeque::new(),
+            until,
+            bar,
+        })
     }
 }
 

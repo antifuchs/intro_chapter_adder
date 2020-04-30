@@ -107,26 +107,23 @@ fn main(args: Options) -> anyhow::Result<()> {
                 .map(|(bar, path)| {
                     let mut ictx = ffmpeg::format::input(&path)
                         .context(format!("opening input file {:?}", &path))?;
-                    let mut detector = detect::detector(&mut ictx)?;
-                    match detector.detect(&mut ictx, until, threshold, &bar) {
-                        Ok(candidates) => {
-                            bar.finish_and_clear();
-                            if do_it {
-                                set_chapters(&path, candidates.iter().enumerate().map(|c| c.into()))
-                            } else {
-                                let chapters: Vec<Chapter> =
-                                    candidates.iter().enumerate().map(|c| c.into()).collect();
-                                bar.println(format!("would set chapters on {:?}:", &path));
-                                for c in chapters {
-                                    bar.println(format!("{}", c));
-                                }
-                                Ok(())
-                            }
+                    let detector = detect::detector(&mut ictx)?;
+                    let candidates: Vec<Candidate> = detector
+                        .markers(&mut ictx, until, &bar)?
+                        .filter(|cand| {
+                            cand.offset > Duration::from_secs(1) && cand.length > threshold
+                        })
+                        .collect();
+                    if do_it {
+                        set_chapters(&path, candidates.iter().enumerate().map(|c| c.into()))
+                    } else {
+                        let chapters: Vec<Chapter> =
+                            candidates.iter().enumerate().map(|c| c.into()).collect();
+                        bar.println(format!("would set chapters on {:?}:", &path));
+                        for c in chapters {
+                            bar.println(format!("{}", c));
                         }
-                        Err(e) => {
-                            bar.abandon_with_message(&format!("Error: {}", e));
-                            Err(e).into()
-                        }
+                        Ok(())
                     }
                 })
                 .collect()

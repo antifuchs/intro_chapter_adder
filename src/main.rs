@@ -116,7 +116,7 @@ fn main(args: Options) -> anyhow::Result<()> {
                             } else {
                                 let chapters: Vec<Chapter> =
                                     candidates.iter().enumerate().map(|c| c.into()).collect();
-                                bar.println("would set chapters:");
+                                bar.println(format!("would set chapters on {:?}:", &path));
                                 for c in chapters {
                                     bar.println(format!("{}", c));
                                 }

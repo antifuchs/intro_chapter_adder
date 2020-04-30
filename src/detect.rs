@@ -1,7 +1,7 @@
 //! Detect silence / blackness on an input file
 use crate::util::to_duration;
-use anyhow::{bail, Context, Result};
-use ffmpeg::{codec, filter, format, frame, media, Frame, Packet, Rational, Stream};
+use anyhow::{Context, Result};
+use ffmpeg::{codec, filter, format, frame, media, Packet, Rational, Stream};
 use indicatif::{HumanDuration, ProgressBar};
 use std::{cmp::max, fmt::Debug, time::Duration};
 
@@ -40,62 +40,7 @@ enum DetectState {
 
 pub(crate) struct Detector {
     audio: SilenceDetector,
-    // TODO:
-    video_stream: usize,
-    video_filter: filter::Graph,
-    video_decoder: codec::decoder::Video,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum StreamState {
-    Ongoing,
-    EndOfAudio,
-    EndOfVideo,
-    End,
-}
-
-impl Default for StreamState {
-    fn default() -> Self {
-        StreamState::Ongoing
-    }
-}
-
-impl StreamState {
-    fn end_of_audio(self) -> Self {
-        use StreamState::*;
-        match self {
-            EndOfVideo => End,
-            _ => EndOfAudio,
-        }
-    }
-
-    fn end_of_video(self) -> Self {
-        use StreamState::*;
-        match self {
-            EndOfAudio => End,
-            _ => EndOfVideo,
-        }
-    }
-
-    fn reading_audio(&self) -> bool {
-        use StreamState::*;
-        match self {
-            End | EndOfAudio => false,
-            _ => true,
-        }
-    }
-
-    fn reading_video(&self) -> bool {
-        use StreamState::*;
-        match self {
-            End | EndOfVideo => false,
-            _ => true,
-        }
-    }
-
-    fn at_end(&self) -> bool {
-        *self == StreamState::End
-    }
+    video: BlankDetector,
 }
 
 impl Detector {
@@ -107,120 +52,64 @@ impl Detector {
         bar: &ProgressBar,
     ) -> Result<Vec<Candidate>> {
         let mut candidates = vec![];
-        let in_time_base = self.video_decoder.time_base(); // TODO: get rid of
-        let mut video = frame::Video::empty();
-        let mut state = StreamState::default();
-
         let mut blank_state = DetectState::None;
 
         for (stream, mut packet) in ictx.packets() {
-            if let Some(false) =
-                self.audio
-                    .detected_pauses_from_packet(&stream, &mut packet, until, |pause| {
-                        blank_state = match (pause, blank_state) {
-                            (PauseMatch::None, s) => s,
-                            (PauseMatch::Start(d), DetectState::None) => DetectState::Audio(d),
-                            (PauseMatch::Start(audio), DetectState::Video(video)) => {
-                                DetectState::VideoAndAudio { video, audio }
+            self.audio
+                .detected_pauses_from_packet(&stream, &mut packet, until, bar, |pause| {
+                    blank_state = match (pause, blank_state) {
+                        (PauseMatch::None, s) => s,
+                        (PauseMatch::Start(d), DetectState::None) => DetectState::Audio(d),
+                        (PauseMatch::Start(audio), DetectState::Video(video)) => {
+                            DetectState::VideoAndAudio { video, audio }
+                        }
+                        (PauseMatch::End(end), DetectState::VideoAndAudio { video, audio }) => {
+                            let offset = max(video, audio);
+                            let length = end - audio;
+                            bar.set_message(&format!(
+                                "quiet blackness at {}",
+                                HumanDuration(offset)
+                            ));
+                            if length > threshold {
+                                candidates.push(Candidate::new(offset, length));
                             }
-                            (PauseMatch::End(end), DetectState::VideoAndAudio { video, audio }) => {
-                                let offset = max(video, audio);
-                                let length = end - audio;
-                                bar.set_message(&format!(
-                                    "quiet blackness at {}",
-                                    HumanDuration(offset)
-                                ));
-                                if length > threshold {
-                                    candidates.push(Candidate::new(offset, length));
-                                }
-                                DetectState::Video(video)
-                            }
-                            (PauseMatch::End(_), DetectState::Audio(_)) => DetectState::None,
-                            combo => {
-                                unreachable!(
-                                    "Unclear combination of audio circumstances: {:?}",
-                                    combo
-                                );
-                            }
-                        };
-                    })?
-            {
-                state = state.end_of_audio();
-            }
+                            DetectState::Video(video)
+                        }
+                        (PauseMatch::End(_), DetectState::Audio(_)) => DetectState::None,
+                        combo => {
+                            unreachable!("Unclear combination of audio circumstances: {:?}", combo);
+                        }
+                    };
+                })?;
 
-            if state.reading_video() && stream.index() == self.video_stream {
-                packet.rescale_ts(stream.time_base(), in_time_base);
-                if let Ok(true) = self.video_decoder.decode(&packet, &mut video) {
-                    let timestamp = video.timestamp();
-                    video.set_pts(timestamp);
-                    if let Some(ts) = timestamp {
-                        let at_ts = to_duration(ts, in_time_base);
-                        if at_ts >= until {
-                            state = state.end_of_video();
+            self.video
+                .detected_pauses_from_packet(&stream, &mut packet, until, bar, |pause| {
+                    blank_state = match (pause, blank_state) {
+                        (PauseMatch::None, s) => s,
+                        (PauseMatch::Start(d), DetectState::None) => DetectState::Video(d),
+                        (PauseMatch::Start(video), DetectState::Audio(audio)) => {
+                            DetectState::VideoAndAudio { audio, video }
                         }
-                        bar.set_position(at_ts.as_millis() as u64);
-                    }
-                    self.video_filter
-                        .get("in")
-                        .unwrap()
-                        .source()
-                        .add(&video)
-                        .unwrap();
-                    while let Ok(..) = self
-                        .video_filter
-                        .get("out")
-                        .unwrap()
-                        .sink()
-                        .frame(&mut video)
-                    {
-                        // read video frame-by-frame:
-                        let meta = video.metadata();
-                        match (
-                            &blank_state,
-                            meta.get("lavfi.black_start"),
-                            meta.get("lavfi.black_end"),
-                            video.timestamp(),
-                        ) {
-                            (_, None, None, _) => {}
-                            (_, Some(_), Some(_), _) => {} // skip super short darkness
-                            (DetectState::Video(_), None, Some(_), _) => {
-                                blank_state = DetectState::None;
+                        (PauseMatch::End(end), DetectState::VideoAndAudio { audio, video }) => {
+                            let offset = max(audio, video);
+                            let length = end - video;
+                            bar.set_message(&format!(
+                                "quiet blackness at {}",
+                                HumanDuration(offset)
+                            ));
+                            if length > threshold {
+                                candidates.push(Candidate::new(offset, length));
                             }
-                            (DetectState::None, Some(_), None, Some(ts)) => {
-                                blank_state = DetectState::Video(to_duration(ts, in_time_base));
-                            }
-                            (DetectState::Audio(video), Some(_), None, Some(ts)) => {
-                                blank_state = DetectState::VideoAndAudio {
-                                    video: *video,
-                                    audio: to_duration(ts, in_time_base),
-                                };
-                            }
-                            (
-                                DetectState::VideoAndAudio { video, audio },
-                                None,
-                                Some(_),
-                                Some(ts),
-                            ) => {
-                                let offset = max(video, audio);
-                                let end = to_duration(ts, in_time_base);
-                                let length = end - *video;
-                                bar.set_message(&format!(
-                                    "quiet blackness at {}",
-                                    HumanDuration(*offset)
-                                ));
-                                if length > threshold {
-                                    candidates.push(Candidate::new(*offset, length));
-                                }
-                                blank_state = DetectState::Audio(*audio);
-                            }
-                            combo => {
-                                bail!("Unclear combination of video things: {:?}", combo);
-                            }
+                            DetectState::Audio(audio)
+                        }
+                        (PauseMatch::End(_), DetectState::Video(_)) => DetectState::None,
+                        combo => {
+                            unreachable!("Unclear combination of video circumstances: {:?}", combo);
                         }
                     }
-                }
-            }
-            if state.at_end() {
+                })?;
+
+            if self.video.at_end && self.audio.at_end {
                 break;
             }
         }
@@ -233,7 +122,7 @@ impl Debug for Detector {
         write!(
             f,
             "Detector {{ audio_stream: {:?}, video_stream: {:?} }}",
-            self.audio.audio_stream, self.video_stream
+            self.audio.audio_stream, self.video.video_stream
         )
     }
 }
@@ -304,9 +193,7 @@ pub(crate) fn detector(ictx: &mut format::context::Input) -> Result<Detector> {
 
     Ok(Detector {
         audio: SilenceDetector::new(audio.index(), audio_filter, audio_decoder),
-        video_stream: video.index(),
-        video_filter,
-        video_decoder,
+        video: BlankDetector::new(video.index(), video_filter, video_decoder),
     })
 }
 
@@ -323,6 +210,7 @@ trait PauseDetector {
         stream: &Stream,
         packet: &mut Packet,
         until: Duration,
+        bar: &ProgressBar,
         mut callback: impl FnMut(PauseMatch),
     ) -> Result<Option<bool>> {
         if !self.is_applicable_stream(&stream) {
@@ -341,6 +229,7 @@ trait PauseDetector {
                 if at_ts >= until {
                     self.set_at_end();
                 }
+                Self::update_progress(bar, at_ts.as_millis() as u64);
             }
             self.filter_frame_in(&frame).unwrap();
             while let Ok(..) = self.filter_frame_output(&mut frame) {
@@ -349,6 +238,8 @@ trait PauseDetector {
         }
         Ok(Some(true))
     }
+
+    fn update_progress(_bar: &ProgressBar, _position: u64) {}
 
     type FrameType;
 
@@ -458,6 +349,112 @@ impl PauseDetector for SilenceDetector {
             meta.get("lavfi.silence_start"),
             meta.get("lavfi.silence_duration"),
             audio.timestamp(),
+        ) {
+            (_, None, None, _) => PauseMatch::None,
+            (_, Some(_), Some(_), _) => PauseMatch::None, // skip super short silences
+            (true, None, Some(_), Some(ts)) => {
+                self.inside_pause = false;
+                PauseMatch::End(to_duration(ts, self.time_base))
+            }
+            (false, Some(_), None, Some(ts)) => {
+                self.inside_pause = true;
+                PauseMatch::Start(to_duration(ts, self.time_base))
+            }
+            combo => {
+                panic!("Unclear combination of audio things: {:?}", combo);
+            }
+        }
+    }
+}
+
+struct BlankDetector {
+    video_stream: usize,
+    time_base: Rational,
+    video_filter: filter::Graph,
+    video_decoder: codec::decoder::Video,
+    at_end: bool,
+    inside_pause: bool,
+}
+
+impl BlankDetector {
+    fn new(
+        video_stream: usize,
+        mut video_filter: filter::Graph,
+        video_decoder: codec::decoder::Video,
+    ) -> Self {
+        video_filter.validate().expect("video filter can't work!");
+        Self {
+            video_stream,
+            time_base: video_decoder.time_base(),
+            video_filter,
+            video_decoder,
+            at_end: false,
+            inside_pause: false,
+        }
+    }
+}
+
+impl PauseDetector for BlankDetector {
+    type FrameType = ffmpeg::frame::Video;
+
+    fn update_progress(bar: &ProgressBar, position: u64) {
+        bar.set_position(position);
+    }
+
+    fn is_applicable_stream(&self, stream: &Stream) -> bool {
+        stream.index() == self.video_stream
+    }
+
+    fn set_at_end(&mut self) {
+        self.at_end = true;
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.at_end
+    }
+
+    fn time_base(&self) -> Rational {
+        self.time_base
+    }
+
+    fn empty_frame() -> Self::FrameType {
+        ffmpeg::frame::Video::empty()
+    }
+
+    fn decode(
+        &mut self,
+        packet: &Packet,
+        mut frame: &mut Self::FrameType,
+    ) -> (Result<bool, ffmpeg::Error>, Option<i64>) {
+        let result = self.video_decoder.decode(packet, &mut frame);
+        if let Ok(true) = result {
+            return (Ok(true), frame.timestamp());
+        }
+        (result, None)
+    }
+
+    fn filter_frame_in(&mut self, frame: &Self::FrameType) -> Result<(), ffmpeg::Error> {
+        self.video_filter.get("in").unwrap().source().add(&frame)
+    }
+
+    fn filter_frame_output(
+        &mut self,
+        mut frame: &mut Self::FrameType,
+    ) -> Result<(), ffmpeg::Error> {
+        self.video_filter
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut frame)
+    }
+
+    fn frame_matches(&mut self, video: &Self::FrameType) -> PauseMatch {
+        let meta = video.metadata();
+        match (
+            self.inside_pause,
+            meta.get("lavfi.black_start"),
+            meta.get("lavfi.black_end"),
+            video.timestamp(),
         ) {
             (_, None, None, _) => PauseMatch::None,
             (_, Some(_), Some(_), _) => PauseMatch::None, // skip super short silences

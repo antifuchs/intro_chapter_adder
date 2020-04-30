@@ -1,6 +1,5 @@
 extern crate ffmpeg4 as ffmpeg;
 use anyhow::{self, bail, Context};
-use detect::Candidate;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use mktemp::Temp;
 use rayon::prelude::*;
@@ -53,6 +52,15 @@ enum Options {
         )]
         threshold: Duration,
 
+        /// Take only this many pauses
+        #[structopt(long = "--only")]
+        only: Option<usize>,
+
+        /// Name the pause markers like this (appends a space and the
+        /// number of the pause to the marker name)
+        #[structopt(long = "--name", default_value = "Pause")]
+        name: String,
+
         /// Actually write chapter markers. NOTE: This overwrites any existing chapters.
         #[structopt(long = "--do-it", short = "-f")]
         do_it: bool,
@@ -83,6 +91,8 @@ fn main(args: Options) -> anyhow::Result<()> {
             until,
             threshold,
             do_it,
+            only,
+            name,
         } => {
             let multibar = MultiProgress::new();
             let sty = ProgressStyle::default_bar().template(
@@ -108,17 +118,18 @@ fn main(args: Options) -> anyhow::Result<()> {
                     let mut ictx = ffmpeg::format::input(&path)
                         .context(format!("opening input file {:?}", &path))?;
                     let detector = detect::detector(&mut ictx)?;
-                    let candidates: Vec<Candidate> = detector
+                    let chapters: Vec<Chapter> = detector
                         .markers(&mut ictx, until, &bar)?
                         .filter(|cand| {
                             cand.offset > Duration::from_secs(1) && cand.length > threshold
                         })
+                        .enumerate()
+                        .take_while(|(n, _)| only.map(|only| n < &only).unwrap_or(true))
+                        .map(|(n, c)| Chapter::new(n, c.offset, format!("{} {}", name, n + 1)))
                         .collect();
                     if do_it {
-                        set_chapters(&path, candidates.iter().enumerate().map(|c| c.into()))
+                        set_chapters(&path, chapters)
                     } else {
-                        let chapters: Vec<Chapter> =
-                            candidates.iter().enumerate().map(|c| c.into()).collect();
                         bar.println(format!("would set chapters on {:?}:", &path));
                         for c in chapters {
                             bar.println(format!("{}", c));
@@ -153,16 +164,6 @@ impl Chapter {
 
     fn new(id: usize, start: Duration, name: String) -> Self {
         Chapter { id, start, name }
-    }
-}
-
-impl From<(usize, &Candidate)> for Chapter {
-    fn from(f: (usize, &Candidate)) -> Self {
-        Chapter {
-            id: f.0,
-            start: f.1.offset,
-            name: format!("Silence {}", f.0 + 1),
-        }
     }
 }
 
